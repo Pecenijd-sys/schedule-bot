@@ -8,8 +8,10 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не установлен! Добавь его в переменные окружения.")
 
 # ID администратора (только он может менять ссылку на расписание)
-# Узнать свой ID можно у бота @userinfobot
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
+# xAI (Grok) API key для умного разбора таблицы
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 
 # Ссылка на Google Таблицу по умолчанию
 DEFAULT_SCHEDULE_URL = os.getenv(
