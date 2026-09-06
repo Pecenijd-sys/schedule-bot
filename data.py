@@ -8,7 +8,7 @@ from io import StringIO
 import pandas as pd
 import requests
 
-from config import DEFAULT_SCHEDULE_URL, GROUPS, DATA_FILE, DAY_MAP
+from config import DEFAULT_SCHEDULE_URL, GROUPS, DATA_FILE, DAY_MAP, XAI_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,8 @@ def load_bot_data() -> dict:
         "schedule_url": DEFAULT_SCHEDULE_URL,
         "user_groups": {},
         "reminders_enabled": {},
+        "ai_cache": None,
+        "ai_cache_time": None,
     }
 
 def save_bot_data(data: dict):
@@ -32,124 +34,163 @@ def save_bot_data(data: dict):
 bot_data = load_bot_data()
 
 
-def fetch_and_parse_schedule(url: str | None = None) -> pd.DataFrame:
-    """Скачивает и парсит оригинальную сложную таблицу университета"""
-    if url is None:
-        url = bot_data.get("schedule_url", DEFAULT_SCHEDULE_URL)
-
-    # Приводим ссылку к CSV-экспорту
+def normalize_url(url: str) -> str:
+    """Приводит ссылку Google Sheets к CSV-экспорту"""
     if "/edit" in url or "docs.google.com/spreadsheets" in url:
         match = re.search(r"/d/([a-zA-Z0-9-_]+)", url)
         gid_match = re.search(r"gid=(\d+)", url)
         if match:
             sheet_id = match.group(1)
             gid = gid_match.group(1) if gid_match else "0"
-            url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+            return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    return url
 
-    logger.info(f"Загружаю расписание: {url}")
+
+def download_csv(url: str) -> str:
+    url = normalize_url(url)
+    logger.info(f"Скачиваю таблицу: {url}")
+    resp = requests.get(url, timeout=40)
+    resp.raise_for_status()
+    return resp.content.decode("utf-8", errors="replace")
+
+
+def parse_with_ai(csv_text: str) -> list[dict]:
+    """Отправляет таблицу в Grok и получает структурированное расписание"""
+    if not XAI_API_KEY:
+        logger.error("XAI_API_KEY не задан")
+        return []
+
+    # Обрезаем слишком длинный CSV (оставляем первые ~120к символов — обычно хватает)
+    if len(csv_text) > 120000:
+        csv_text = csv_text[:120000] + "\n...[обрезано]..."
+
+    system_prompt = """Ты — эксперт по разбору университетских расписаний.
+Тебе дают сырой CSV из сложной Google-таблицы расписания 1 курса ІПЗ (КНУ).
+
+Твоя задача — максимально точно извлечь ВСЕ занятия для групп ІПЗ-11, ІПЗ-12, ІПЗ-13, ІПЗ-14.
+
+Правила:
+1. Включай и лекции (Л), и лабораторные (лаб), и практики (Пр).
+2. Если занятие общее для нескольких групп/подгрупп — продублируй его для каждой группы.
+3. Старайся вытащить преподавателя и ссылку (Zoom / Meet / Teams), даже если ссылка написана коротко (teams, knu-ua.zoom, zoom).
+4. Если ссылка короткая — оставляй как есть (например "teams" или "knu-ua.zoom").
+5. Дни пиши украинским: Понеділок, Вівторок, Середа, Четвер, П'ятниця.
+6. Время в формате 9:00-10:20 или 10:30-11:50 и т.д.
+7. Игнорируй іноземну мову, если она явно только для отдельных подгрупп и не нужна потоку (но если сомневаешься — лучше включи).
+
+Верни ТОЛЬКО валидный JSON-массив объектов. Никакого текста до или после.
+Формат каждого объекта:
+{
+  "group": "ІПЗ-11",
+  "day": "Вівторок",
+  "time": "9:00-10:20",
+  "subject": "Математичні основи програмної інженерії",
+  "kind": "Л",
+  "teacher": "Ковтун О. І.",
+  "link": "https://...",
+  "note": ""
+}
+
+Если чего-то нет — оставляй пустую строку.
+Старайся вытащить максимум реальных занятий."""
+
+    user_prompt = f"Вот CSV таблицы расписания:\n\n{csv_text}"
 
     try:
-        resp = requests.get(url, timeout=30)
+        resp = requests.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "grok-4-fast-non-reasoning",  # быстрый и дешёвый
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.1,
+            },
+            timeout=90,
+        )
         resp.raise_for_status()
-        content = resp.content.decode("utf-8", errors="replace")
-        df = pd.read_csv(StringIO(content), header=None, dtype=str).fillna("")
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"].strip()
+
+        # Убираем возможные ```json обёртки
+        content = re.sub(r"^```json\s*", "", content)
+        content = re.sub(r"\s*```$", "", content)
+
+        result = json.loads(content)
+        if isinstance(result, list):
+            logger.info(f"ИИ извлёк {len(result)} занятий")
+            return result
+        else:
+            logger.error("ИИ вернул не список")
+            return []
     except Exception as e:
-        logger.error(f"Ошибка загрузки таблицы: {e}")
+        logger.error(f"Ошибка ИИ-парсинга: {e}")
+        return []
+
+
+def fetch_and_parse_schedule(url: str | None = None, force: bool = False) -> pd.DataFrame:
+    """Главная функция: скачивает + парсит через ИИ (с кэшем)"""
+    if url is None:
+        url = bot_data.get("schedule_url", DEFAULT_SCHEDULE_URL)
+
+    # Проверяем кэш (2 часа)
+    cache = bot_data.get("ai_cache")
+    cache_time_str = bot_data.get("ai_cache_time")
+    if not force and cache and cache_time_str:
+        try:
+            cache_time = datetime.fromisoformat(cache_time_str)
+            if datetime.now() - cache_time < timedelta(hours=2):
+                logger.info("Использую кэш ИИ-парсинга")
+                return pd.DataFrame(cache)
+        except Exception:
+            pass
+
+    try:
+        csv_text = download_csv(url)
+        items = parse_with_ai(csv_text)
+
+        if not items:
+            logger.warning("ИИ ничего не вернул")
+            return pd.DataFrame()
+
+        # Нормализуем
+        rows = []
+        for item in items:
+            rows.append({
+                "Група": item.get("group", "").strip(),
+                "День": item.get("day", "").strip(),
+                "Час": item.get("time", "").strip(),
+                "Предмет": item.get("subject", "").strip(),
+                "Вид": item.get("kind", "").strip(),
+                "Викладач": item.get("teacher", "").strip(),
+                "Аудиторія": "",
+                "Посилання": item.get("link", "").strip(),
+                "Примітка": item.get("note", "").strip(),
+            })
+
+        df = pd.DataFrame(rows)
+        df = df[df["Група"].isin(GROUPS)]
+        df = df.drop_duplicates(subset=["Група", "День", "Час", "Предмет"])
+
+        # Сохраняем в кэш
+        bot_data["ai_cache"] = rows
+        bot_data["ai_cache_time"] = datetime.now().isoformat()
+        save_bot_data(bot_data)
+
+        logger.info(f"Успешно получено {len(df)} записей через ИИ")
+        return df
+
+    except Exception as e:
+        logger.error(f"Ошибка получения расписания: {e}")
         return pd.DataFrame()
 
-    group_cols = {
-        "ІПЗ-11": list(range(2, 8)),
-        "ІПЗ-12": list(range(8, 14)),
-        "ІПЗ-13": list(range(14, 20)),
-        "ІПЗ-14": list(range(20, 24)),
-    }
 
-    rows = []
-    current_day = ""
-    i = 4
-    while i < min(len(df), 400):
-        day_raw = str(df.iloc[i, 0]).strip().lower()
-        time = str(df.iloc[i, 1]).strip()
-
-        if day_raw in ["понеділок", "вівторок", "середа", "четвер", "п'ятниця", "субота"]:
-            day_map = {
-                "понеділок": "Понеділок",
-                "вівторок": "Вівторок",
-                "середа": "Середа",
-                "четвер": "Четвер",
-                "п'ятниця": "П'ятниця",
-                "субота": "Субота",
-            }
-            current_day = day_map.get(day_raw, day_raw)
-
-        if time and re.match(r"\d{1,2}:\d{2}-\d{1,2}:\d{2}", time):
-            for group, cols in group_cols.items():
-                subjects = []
-                for col in cols:
-                    val = str(df.iloc[i, col]).strip()
-                    if val and len(val) > 3 and not val.isdigit():
-                        subjects.append(val)
-
-                if not subjects:
-                    continue
-
-                teacher = ""
-                link = ""
-                note = ""
-                for k in range(i + 1, min(i + 7, len(df))):
-                    for col in cols:
-                        val = str(df.iloc[k, col]).strip()
-                        if not val:
-                            continue
-                        if val.startswith("[") and "]" in val:
-                            note = val
-                        elif any(x in val.lower() for x in ["http", "zoom.us", "meet.google", "teams.microsoft"]):
-                            if not link:
-                                link = val.split()[0]
-                        elif (
-                            len(val) > 4
-                            and not re.match(r"^\d", val)
-                            and "ауд" not in val.lower()
-                            and "підгр" not in val.lower()
-                        ):
-                            if not teacher:
-                                teacher = val
-
-                for subj in subjects:
-                    kind = ""
-                    if "(Л)" in subj:
-                        kind = "Л"
-                    elif "лаб" in subj.lower():
-                        kind = "лаб"
-                    elif "(Пр)" in subj or "Пр)" in subj:
-                        kind = "Пр"
-
-                    clean_subj = re.sub(r"\s*\([^)]*\)\s*", "", subj).strip()
-                    clean_subj = re.sub(r"\s*\[.*?\]\s*", "", clean_subj).strip()
-
-                    rows.append({
-                        "Група": group,
-                        "День": current_day,
-                        "Час": time,
-                        "Предмет": clean_subj,
-                        "Вид": kind,
-                        "Викладач": teacher,
-                        "Аудиторія": "",
-                        "Посилання": link,
-                        "Примітка": note,
-                    })
-        i += 1
-
-    if not rows:
-        logger.warning("Не удалось извлечь пары из таблицы")
-        return pd.DataFrame()
-
-    result = pd.DataFrame(rows)
-    result = result.drop_duplicates(subset=["Група", "День", "Час", "Предмет"])
-    logger.info(f"Извлечено {len(result)} записей")
-    return result
-
-
+# Кэш в памяти
 _schedule_cache: pd.DataFrame | None = None
 _cache_time: datetime | None = None
 
@@ -164,7 +205,7 @@ def get_schedule_df(force: bool = False) -> pd.DataFrame:
     ):
         return _schedule_cache
 
-    _schedule_cache = fetch_and_parse_schedule()
+    _schedule_cache = fetch_and_parse_schedule(force=force)
     _cache_time = now
     return _schedule_cache
 
@@ -203,7 +244,7 @@ def format_schedule(df: pd.DataFrame, title: str = "") -> str:
         link = row.get("Посилання", "")
         note = row.get("Примітка", "")
 
-        kind_emoji = "📘" if kind == "Л" else "🔬" if kind == "лаб" else "📗" if kind == "Пр" else "📕"
+        kind_emoji = "📘" if kind == "Л" else "🔬" if "лаб" in str(kind).lower() else "📗" if kind == "Пр" else "📕"
         line = f"{kind_emoji} <b>{time}</b> — {subject}"
         if kind:
             line += f" ({kind})"
@@ -212,7 +253,10 @@ def format_schedule(df: pd.DataFrame, title: str = "") -> str:
         if teacher:
             lines.append(f"   👤 {teacher}")
         if link:
-            lines.append(f"   🔗 <a href='{link}'>Посилання на пару</a>")
+            if link.startswith("http"):
+                lines.append(f"   🔗 <a href='{link}'>Посилання на пару</a>")
+            else:
+                lines.append(f"   🔗 {link}")
         if note:
             lines.append(f"   📌 {note}")
 
@@ -222,6 +266,8 @@ def format_schedule(df: pd.DataFrame, title: str = "") -> str:
 def set_schedule_url(url: str) -> bool:
     global _schedule_cache, _cache_time
     bot_data["schedule_url"] = url
+    bot_data["ai_cache"] = None
+    bot_data["ai_cache_time"] = None
     save_bot_data(bot_data)
     _schedule_cache = None
     _cache_time = None
