@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -54,7 +55,7 @@ async def reminder_loop(bot: Bot):
     sent_reminders = set()
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(ZoneInfo("Europe/Kyiv"))
             current_day = DAY_MAP.get(now.weekday(), "")
             if current_day in ["Субота", "Неділя"]:
                 await asyncio.sleep(60)
@@ -83,6 +84,7 @@ async def reminder_loop(bot: Bot):
                         start_str = time_str.split("-")[0].strip()
                         hour, minute = map(int, start_str.split(":"))
                         pair_start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        # already timezone-aware
                     except Exception:
                         continue
 
@@ -173,7 +175,7 @@ async def main():
         if not udata.get("group"):
             await message.answer("Спочатку обери групу:", reply_markup=groups_keyboard())
             return
-        today = datetime.now()
+        today = datetime.now(ZoneInfo("Europe/Kyiv"))
         day_name = DAY_MAP[today.weekday()]
         if day_name in ["Субота", "Неділя"]:
             await message.answer(f"📅 <b>Сьогодні ({day_name})</b>\n\nВихідний! 🎉")
@@ -188,7 +190,7 @@ async def main():
         if not udata.get("group"):
             await message.answer("Спочатку обери групу:", reply_markup=groups_keyboard())
             return
-        tomorrow = datetime.now() + timedelta(days=1)
+        tomorrow = datetime.now(ZoneInfo("Europe/Kyiv")) + timedelta(days=1)
         day_name = DAY_MAP[tomorrow.weekday()]
         if day_name in ["Субота", "Неділя"]:
             await message.answer(f"➡️ <b>Завтра ({day_name})</b>\n\nВихідний! 🎉")
