@@ -54,18 +54,17 @@ def download_raw(url: str) -> str:
 
 
 def parse_simple_csv(text: str) -> pd.DataFrame:
-    """Парсит чистую таблицу"""
     df = pd.read_csv(StringIO(text), dtype=str)
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Приводим названия колонок к стандартным
     rename = {}
     for col in df.columns:
         c = col.lower()
-        if "група" in c:
-            rename[col] = "Група"
-        elif "підгруп" in c or "подгруп" in c:
+        # ВАЖНО: сначала проверяем "підгруп", потом "група"
+        if "підгруп" in c or "подгруп" in c:
             rename[col] = "Підгрупа"
+        elif "група" in c:
+            rename[col] = "Група"
         elif "день" in c:
             rename[col] = "День"
         elif "час" in c:
@@ -85,20 +84,14 @@ def parse_simple_csv(text: str) -> pd.DataFrame:
 
     df = df.rename(columns=rename)
 
-    # Гарантируем наличие всех нужных колонок
     for col in ["Група", "Підгрупа", "День", "Час", "Предмет", "Вид", "Викладач", "Аудиторія", "Посилання", "Примітка"]:
         if col not in df.columns:
             df[col] = ""
 
-    # Убираем полностью пустые строки
     df = df.fillna("")
     df = df[df["Група"].astype(str).str.strip() != ""]
     df = df[df["День"].astype(str).str.strip() != ""]
-
-    # Оставляем только нужные группы
     df = df[df["Група"].isin(GROUPS)]
-
-    # Сбрасываем индекс, чтобы не было проблем с дубликатами
     df = df.reset_index(drop=True)
 
     logger.info(f"Простая таблица загружена: {len(df)} записей")
@@ -110,7 +103,6 @@ def fetch_and_parse_schedule(url: str | None = None, force: bool = False) -> pd.
         url = bot_data.get("schedule_url", DEFAULT_SCHEDULE_URL)
     try:
         text = download_raw(url)
-        # Проверяем, что это наша простая таблица
         first_line = text.split("\n")[0].lower()
         if "група" in first_line:
             return parse_simple_csv(text)
@@ -143,7 +135,6 @@ def get_schedule_for_group(group: str, subgroup: str | None = None, day: str | N
     df = df[df["Група"] == group].copy()
 
     if subgroup:
-        # Общие (*) + конкретная подгруппа
         subg = df["Підгрупа"].astype(str).str.strip()
         mask = (subg == "") | (subg == "*") | (subg == str(subgroup))
         df = df[mask]
@@ -189,11 +180,10 @@ def format_schedule(df: pd.DataFrame, title: str = "") -> str:
 
         if teacher:
             lines.append(f"   👤 {teacher}")
-        if link:
-            if str(link).startswith("http"):
-                lines.append(f"   🔗 <a href='{link}'>Посилання</a>")
-            else:
-                lines.append(f"   🔗 {link}")
+        if link and str(link).startswith("http"):
+            lines.append(f"   🔗 <a href='{link}'>Посилання</a>")
+        elif link:
+            lines.append(f"   🔗 {link}")
         if note:
             lines.append(f"   📌 {note}")
 
