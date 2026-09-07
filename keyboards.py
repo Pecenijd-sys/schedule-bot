@@ -1,10 +1,23 @@
 from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
-from config import GROUPS, DAYS
+from config import DAYS
 
 
-# Реальные подгруппы по группам
+# Короткие имена для UI и полные для хранения
+GROUP_OPTIONS = [
+    ("ІПЗ-11", "група ІПЗ-11"),
+    ("ІПЗ-12", "група ІПЗ-12"),
+    ("ІПЗ-13", "група ІПЗ-13"),
+    ("ІПЗ-14", "група ІПЗ-14"),
+]
+
+# Реальные подгруппы по коротким именам групп
 SUBGROUPS_MAP = {
+    "група ІПЗ-11": [(1, 1), (2, 2), (3, 3)],
+    "група ІПЗ-12": [(4, 1), (5, 2), (6, 3)],
+    "група ІПЗ-13": [(7, 1), (8, 2), (9, 3)],
+    "група ІПЗ-14": [(10, 1), (11, 2)],
+    # на всякий случай и короткие ключи
     "ІПЗ-11": [(1, 1), (2, 2), (3, 3)],
     "ІПЗ-12": [(4, 1), (5, 2), (6, 3)],
     "ІПЗ-13": [(7, 1), (8, 2), (9, 3)],
@@ -14,8 +27,8 @@ SUBGROUPS_MAP = {
 
 def groups_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for group in GROUPS:
-        builder.button(text=group, callback_data=f"group:{group}")
+    for short, full in GROUP_OPTIONS:
+        builder.button(text=short, callback_data=f"group:{full}")
     builder.adjust(2)
     return builder.as_markup()
 
