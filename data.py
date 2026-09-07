@@ -53,47 +53,56 @@ def download_raw(url: str) -> str:
     return resp.content.decode("utf-8", errors="replace")
 
 
-def is_simple_table(text: str) -> bool:
-    first_line = text.split("\n")[0].lower()
-    return "група" in first_line and ("день" in first_line or "час" in first_line)
-
-
 def parse_simple_csv(text: str) -> pd.DataFrame:
-    df = pd.read_csv(StringIO(text), dtype=str).fillna("")
-    col_map = {}
-    for col in df.columns:
-        c = str(col).strip().lower()
-        if "група" in c:
-            col_map[col] = "Група"
-        elif "підгруп" in c or "подгруп" in c:
-            col_map[col] = "Підгрупа"
-        elif "день" in c:
-            col_map[col] = "День"
-        elif "час" in c:
-            col_map[col] = "Час"
-        elif "предмет" in c:
-            col_map[col] = "Предмет"
-        elif "вид" in c:
-            col_map[col] = "Вид"
-        elif "виклад" in c:
-            col_map[col] = "Викладач"
-        elif "аудит" in c:
-            col_map[col] = "Аудиторія"
-        elif "посилан" in c or "link" in c:
-            col_map[col] = "Посилання"
-        elif "приміт" in c:
-            col_map[col] = "Примітка"
+    """Парсит чистую таблицу"""
+    df = pd.read_csv(StringIO(text), dtype=str)
+    df.columns = [str(c).strip() for c in df.columns]
 
-    df = df.rename(columns=col_map)
-    needed = ["Група", "Підгрупа", "День", "Час", "Предмет", "Вид", "Викладач", "Аудиторія", "Посилання", "Примітка"]
-    for col in needed:
+    # Приводим названия колонок к стандартным
+    rename = {}
+    for col in df.columns:
+        c = col.lower()
+        if "група" in c:
+            rename[col] = "Група"
+        elif "підгруп" in c or "подгруп" in c:
+            rename[col] = "Підгрупа"
+        elif "день" in c:
+            rename[col] = "День"
+        elif "час" in c:
+            rename[col] = "Час"
+        elif "предмет" in c:
+            rename[col] = "Предмет"
+        elif c == "вид":
+            rename[col] = "Вид"
+        elif "виклад" in c:
+            rename[col] = "Викладач"
+        elif "аудит" in c:
+            rename[col] = "Аудиторія"
+        elif "посилан" in c:
+            rename[col] = "Посилання"
+        elif "приміт" in c:
+            rename[col] = "Примітка"
+
+    df = df.rename(columns=rename)
+
+    # Гарантируем наличие всех нужных колонок
+    for col in ["Група", "Підгрупа", "День", "Час", "Предмет", "Вид", "Викладач", "Аудиторія", "Посилання", "Примітка"]:
         if col not in df.columns:
             df[col] = ""
-    df = df[needed]
+
+    # Убираем полностью пустые строки
+    df = df.fillna("")
+    df = df[df["Група"].astype(str).str.strip() != ""]
+    df = df[df["День"].astype(str).str.strip() != ""]
+
+    # Оставляем только нужные группы
     df = df[df["Група"].isin(GROUPS)]
-    df = df[df["День"] != ""]
-    logger.info(f"Простая таблица: {len(df)} записей")
-    return df
+
+    # Сбрасываем индекс, чтобы не было проблем с дубликатами
+    df = df.reset_index(drop=True)
+
+    logger.info(f"Простая таблица загружена: {len(df)} записей")
+    return df[["Група", "Підгрупа", "День", "Час", "Предмет", "Вид", "Викладач", "Аудиторія", "Посилання", "Примітка"]]
 
 
 def fetch_and_parse_schedule(url: str | None = None, force: bool = False) -> pd.DataFrame:
@@ -101,10 +110,12 @@ def fetch_and_parse_schedule(url: str | None = None, force: bool = False) -> pd.
         url = bot_data.get("schedule_url", DEFAULT_SCHEDULE_URL)
     try:
         text = download_raw(url)
-        if is_simple_table(text):
+        # Проверяем, что это наша простая таблица
+        first_line = text.split("\n")[0].lower()
+        if "група" in first_line:
             return parse_simple_csv(text)
         else:
-            logger.warning("Сложная таблица — используйте чистую")
+            logger.warning("Это не простая таблица")
             return pd.DataFrame()
     except Exception as e:
         logger.error(f"Ошибка: {e}")
@@ -132,14 +143,15 @@ def get_schedule_for_group(group: str, subgroup: str | None = None, day: str | N
     df = df[df["Група"] == group].copy()
 
     if subgroup:
-        # Показываем общие (*) + конкретную подгруппу
-        mask = (df["Підгрупа"] == "") | (df["Підгрупа"] == "*") | (df["Підгрупа"] == str(subgroup))
+        # Общие (*) + конкретная подгруппа
+        subg = df["Підгрупа"].astype(str).str.strip()
+        mask = (subg == "") | (subg == "*") | (subg == str(subgroup))
         df = df[mask]
 
     if day:
         df = df[df["День"] == day]
 
-    return df.sort_values(by=["День", "Час"])
+    return df.sort_values(by=["День", "Час"]).reset_index(drop=True)
 
 
 def format_schedule(df: pd.DataFrame, title: str = "") -> str:
@@ -165,7 +177,7 @@ def format_schedule(df: pd.DataFrame, title: str = "") -> str:
         teacher = row.get("Викладач", "")
         link = row.get("Посилання", "")
         note = row.get("Примітка", "")
-        subg = row.get("Підгрупа", "")
+        subg = str(row.get("Підгрупа", "")).strip()
 
         kind_emoji = "📘" if kind == "Л" else "🔬" if "лаб" in str(kind).lower() else "📗" if kind == "Пр" else "📕"
         line = f"{kind_emoji} <b>{time}</b> — {subject}"
