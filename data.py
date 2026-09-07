@@ -142,7 +142,12 @@ def get_schedule_for_group(group: str, subgroup: str | None = None, day: str | N
     if day:
         df = df[df["День"] == day]
 
-    return df.sort_values(by=["День", "Час"]).reset_index(drop=True)
+    # Правильный порядок дней
+    day_order = {"Понеділок": 0, "Вівторок": 1, "Середа": 2, "Четвер": 3, "П'ятниця": 4, "Субота": 5}
+    df = df.copy()
+    df["_day_order"] = df["День"].map(day_order).fillna(99)
+    df = df.sort_values(by=["_day_order", "Час"]).drop(columns=["_day_order"]).reset_index(drop=True)
+    return df
 
 
 def format_schedule(df: pd.DataFrame, title: str = "") -> str:
